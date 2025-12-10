@@ -1,57 +1,31 @@
-import logging
-import time
-import threading
-import os
-from dotenv import load_dotenv
-from poller import poll_recent_and_enqueue, load_state
-from replier import process_queue
-from autodm import run_autodm_cycle
-from scheduler import start as start_scheduler
+import threading, signal, sys
+from health import app as health_app
+from werkzeug.serving import make_server
 
-load_dotenv()
-logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"))
-logger = logging.getLogger("future-playbook")
+class HealthServerThread(threading.Thread):
+    def __init__(self, app, host='0.0.0.0', port=8080):
+        threading.Thread.__init__(self)
+        self.srv = make_server(host, port, app)
+        self.ctx = app.app_context()
+        self.ctx.push()
 
-reply_queue = []
+    def run(self):
+        self.srv.serve_forever()
 
-def poller_loop():
-    while True:
-        try:
-            poll_recent_and_enqueue(reply_queue)
-        except Exception as e:
-            logger.exception("Poller error: %s", e)
-        time.sleep(30)  # poll every 30s
+    def shutdown(self):
+        self.srv.shutdown()
 
-def replier_loop():
-    while True:
-        try:
-            if reply_queue:
-                process_queue(reply_queue)
-        except Exception as e:
-            logger.exception("Replier error: %s", e)
-        time.sleep(10)
+# before starting other threads:
+health_port = int(os.getenv("HEALTH_PORT", "8080"))
+health_thread = HealthServerThread(health_app, port=health_port)
+health_thread.daemon = True
+health_thread.start()
+logger.info("Health server started on port %s", health_port)
 
-def autodm_loop():
-    while True:
-        try:
-            run_autodm_cycle()
-        except Exception as e:
-            logger.exception("AutoDM error: %s", e)
-        time.sleep(300)  # every 5 minutes
+def shutdown(signum, frame):
+    logger.info("signal %s received: shutting down", signum)
+    health_thread.shutdown()
+    sys.exit(0)
 
-if __name__ == "__main__":
-    # start scheduler in thread
-    t_sched = threading.Thread(target=start_scheduler, daemon=True)
-    t_sched.start()
-
-    t1 = threading.Thread(target=poller_loop, daemon=True)
-    t2 = threading.Thread(target=replier_loop, daemon=True)
-    t3 = threading.Thread(target=autodm_loop, daemon=True)
-
-    t1.start(); t2.start(); t3.start()
-
-    try:
-        while True:
-            time.sleep(10)
-    except KeyboardInterrupt:
-        logger.info("Shutting down.")
+signal.signal(signal.SIGINT, shutdown)
+signal.signal(signal.SIGTERM, shutdown)
