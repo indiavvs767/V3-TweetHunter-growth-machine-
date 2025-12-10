@@ -34,13 +34,34 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def send_reply(tweet_id, text):
-    try:
-        resp = api.update_status(status=text, in_reply_to_status_id=tweet_id, auto_populate_reply_metadata=True)
-        logger.info("Replied to %s", tweet_id)
-        return resp
-    except Exception as e:
-        logger.exception("Error replying: %s", e)
-        return None
+    if DRY_RUN:
+        logger.info(f"[DRY_RUN] Would reply to {tweet_id}: {text}")
+        return {"status": "dry_run"}
+
+    retry = 0
+
+    while retry < MAX_RETRIES:
+        try:
+            logger.debug(f"Sending reply → {tweet_id}: {text}")
+
+            resp = client.create_tweet(
+                text=text,
+                reply={"in_reply_to_tweet_id": tweet_id}
+            )
+
+            logger.info(f"[SENT] reply to {tweet_id}")
+            return resp
+
+        except Exception as e:
+            logger.warn(f"[ERROR] Reply failed: {e}")
+
+            retry += 1
+            wait = exponential_backoff(retry)
+            logger.warn(f"[BACKOFF] Retry {retry}/{MAX_RETRIES} in {wait:.2f}s")
+            time.sleep(wait)
+
+    logger.error("[FAILED] Max retries exceeded for reply")
+    return None
 
 def process_queue(reply_queue):
     state = load_state()
